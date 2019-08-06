@@ -7084,7 +7084,7 @@ bool CoreChecks::PreCallValidateCmdBuildAccelerationStructureNV(VkCommandBuffer 
         }
         if (scratch_buffer_state != nullptr && dst_as_state != nullptr &&
             dst_as_state->update_scratch_memory_requirements.memoryRequirements.size >
-                (scratch_buffer_state->binding.size - (scratch_buffer_state->binding.offset + scratchOffset))) {
+                (scratch_buffer_state->binding.size - scratchOffset)) {
             skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_BUFFER_EXT,
                             HandleToUint64(commandBuffer), "VUID-vkCmdBuildAccelerationStructureNV-update-02492",
                             "vkCmdBuildAccelerationStructureNV(): If update is VK_TRUE, The size member of the "
@@ -7106,7 +7106,7 @@ bool CoreChecks::PreCallValidateCmdBuildAccelerationStructureNV(VkCommandBuffer 
         }
         if (scratch_buffer_state != nullptr && dst_as_state != nullptr &&
             dst_as_state->build_scratch_memory_requirements.memoryRequirements.size >
-                (scratch_buffer_state->binding.size - (scratch_buffer_state->binding.offset + scratchOffset))) {
+                (scratch_buffer_state->binding.size - scratchOffset)) {
             skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_BUFFER_EXT,
                             HandleToUint64(commandBuffer), "VUID-vkCmdBuildAccelerationStructureNV-update-02491",
                             "vkCmdBuildAccelerationStructureNV(): If update is VK_FALSE, The size member of the "
