@@ -78,16 +78,6 @@ else()
     endif()
 endif()
 
-# ~~~
-# The vulkan loader search is:
-#     Existing vulkan target already present in the build
-#     User-supplied setting of CMAKE_PREFIX_PATH
-#     VULKAN_LOADER_INSTALL_DIR defined via cmake option
-#     VULKAN_LOADER_INSTALL_DIR defined via environment variable
-#     Default findVulkan operation if the VULKAN_SDK environment variable is defined
-# ~~~
-set(VULKAN_LOADER_INSTALL_DIR "LOADER-NOTFOUND" CACHE PATH "Absolute path to a Vulkan-Loader install directory")
-
 if(NOT TARGET vulkan)
     if(VULKAN_LOADER_INSTALL_DIR)
         message(STATUS "VULKAN_LOADER_INSTALL_DIR specified, using find_package to locate Vulkan")
@@ -167,12 +157,6 @@ if(WIN32)
         file(TO_NATIVE_PATH ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG> DST_GTEST_DLLS)
         add_custom_command(TARGET vk_layer_validation_tests POST_BUILD
                            COMMAND xcopy /Y /I ${SRC_GTEST_DLLS} ${DST_GTEST_DLLS})
-    endif()
-    # Copy the loader shared lib (if supplied) to the test application directory so the test app finds it.
-    if(VULKAN_LOADER_INSTALL_DIR AND NOT LOCAL_LOADER)
-        add_custom_command(TARGET vk_layer_validation_tests POST_BUILD
-                           COMMAND ${CMAKE_COMMAND} -E copy ${VULKAN_LOADER_INSTALL_DIR}/bin/vulkan-1.dll
-                                   $<TARGET_FILE_DIR:vk_layer_validation_tests>)
     endif()
 endif()
 
