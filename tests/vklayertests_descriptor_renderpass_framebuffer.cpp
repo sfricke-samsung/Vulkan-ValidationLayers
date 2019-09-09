@@ -7413,3 +7413,20 @@ TEST_F(VkLayerTest, InlineUniformBlockEXT) {
     vkDestroyDescriptorPool(m_device->handle(), ds_pool, nullptr);
     vkDestroyDescriptorSetLayout(m_device->device(), ds_layout, nullptr);
 }
+
+TEST_F(VkLayerTest, WrongdstArrayElement) {
+
+    ASSERT_NO_FATAL_FAILURE(Init());
+    OneOffDescriptorSet descriptor_set(m_device, {
+                                                     {0, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_ALL, nullptr},
+                                                     {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr},
+                                                 });
+    VkImageObj image(m_device);
+    image.Init(32, 32, 1, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT, VK_IMAGE_TILING_OPTIMAL, 0);
+    VkImageView view = image.targetView(VK_FORMAT_B8G8R8A8_UNORM);
+    descriptor_set.WriteDescriptorImageInfo(0, view, VK_NULL_HANDLE, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT);
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "UNASSIGNED-CoreValidation-vkUpdateDescriptorSets-DataTypeMissmatched");
+    descriptor_set.descriptor_writes[0].dstArrayElement = 1;
+    descriptor_set.UpdateDescriptorSets();
+    m_errorMonitor->VerifyFound();
+}
