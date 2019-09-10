@@ -235,6 +235,7 @@ static const char DECORATE_UNUSED *kVUID_Core_Swapchain_PreTransform = "UNASSIGN
 
 static const char DECORATE_UNUSED *kVUID_Core_Image_InvalidFormatLimitsViolation = "UNASSIGNED-CoreValidation-Image-InvalidFormatLimitsViolation";
 static const char DECORATE_UNUSED *kVUID_Core_Image_ZeroAreaSubregion = "UNASSIGNED-CoreValidation-Image-ZeroAreaSubregion";
+static const char DECORATE_UNUSED *kVUID_Core_UpdateDescriptorSets_DataTypeMissmatched = "UNASSIGNED-CoreValidation-vkUpdateDescriptorSets-DataTypeMissmatched";
 
 static const char DECORATE_UNUSED *kVUID_Core_PushDescriptorUpdate_TemplateType = "UNASSIGNED-CoreValidation-vkCmdPushDescriptorSetWithTemplateKHR-descriptorUpdateTemplate-templateType";
 static const char DECORATE_UNUSED *kVUID_Core_PushDescriptorUpdate_Template_SetMismatched = "UNASSIGNED-CoreValidation-vkCmdPushDescriptorSetWithTemplateKHR-set";
