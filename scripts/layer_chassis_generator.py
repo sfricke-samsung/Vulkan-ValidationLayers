@@ -1150,7 +1150,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(
     bool skip = false;
 
 #ifdef BUILD_CORE_VALIDATION
-        create_graphics_pipeline_api_state cgpl_state[LayerObjectTypeMaxEnum]{};
+        create_graphics_pipeline_api_state cgpl_state[LayerObjectTypeMaxEnum] = {};
 #else
         struct create_graphics_pipeline_api_state {
             const VkGraphicsPipelineCreateInfo* pCreateInfos;
@@ -1191,7 +1191,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(
     bool skip = false;
 
 #ifdef BUILD_CORE_VALIDATION
-    create_compute_pipeline_api_state ccpl_state[LayerObjectTypeMaxEnum]{};
+    create_compute_pipeline_api_state ccpl_state[LayerObjectTypeMaxEnum] = {};
 #else
     struct create_compute_pipeline_api_state {
         const VkComputePipelineCreateInfo* pCreateInfos;
@@ -1231,7 +1231,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateRayTracingPipelinesNV(
     bool skip = false;
 
 #ifdef BUILD_CORE_VALIDATION
-    create_ray_tracing_pipeline_api_state crtpl_state[LayerObjectTypeMaxEnum]{};
+    create_ray_tracing_pipeline_api_state crtpl_state[LayerObjectTypeMaxEnum] = {};
 #else
     struct create_ray_tracing_pipeline_api_state {
         const VkRayTracingPipelineCreateInfoNV* pCreateInfos;
