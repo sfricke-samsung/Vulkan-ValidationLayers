@@ -1465,7 +1465,25 @@ TEST_F(VkLayerTest, CompressedImageMipCopyTests) {
 
 TEST_F(VkLayerTest, ImageBufferCopyTests) {
     TEST_DESCRIPTION("Image to buffer and buffer to image tests");
-    ASSERT_NO_FATAL_FAILURE(Init());
+
+    // Enable KHR multiplane req'd extensions for multi-planar copy tests
+    bool mp_extensions = InstanceExtensionSupported(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+                                                    VK_KHR_GET_MEMORY_REQUIREMENTS_2_SPEC_VERSION);
+    if (mp_extensions) {
+        m_instance_extension_names.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    }
+    ASSERT_NO_FATAL_FAILURE(InitFramework(myDbgFunc, m_errorMonitor));
+    mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+    mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+    mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+    mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+    if (mp_extensions) {
+        m_device_extension_names.push_back(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+        m_device_extension_names.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+        m_device_extension_names.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+        m_device_extension_names.push_back(VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+    }
+    ASSERT_NO_FATAL_FAILURE(InitState(nullptr, nullptr, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT));
 
     // Bail if any dimension of transfer granularity is 0.
     auto index = m_device->graphics_queue_node_index_;
@@ -1940,6 +1958,67 @@ TEST_F(VkLayerTest, ImageBufferCopyTests) {
         vk::CmdCopyImageToBuffer(m_commandBuffer->handle(), image_16k_4x4comp.handle(), VK_IMAGE_LAYOUT_GENERAL,
                                  buffer_64k.handle(), 1, &region);
         m_errorMonitor->VerifyFound();
+
+        // VkImageObj is destroyed at end of scope which invalidates the command buffer
+        // explicitly reset for next potential scope using it
+        m_commandBuffer->reset();
+        m_commandBuffer->begin();
+    }
+
+    // Test multi-planar formats, if supported
+    if (!mp_extensions) {
+        printf("%s multi-planar extensions not supported; skipped.\n", kSkipPrefix);
+    } else {
+        // Try to use G8_B8R8_2PLANE_420_UNORM because need 2-plane format for some tests and likely supported due to copy support
+        // being required with samplerYcbcrConversion feature
+        VkFormatProperties properties_multi_planar = {};
+        vk::GetPhysicalDeviceFormatProperties(m_device->phy().handle(), VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
+                                              &properties_multi_planar);
+        if (!(properties_multi_planar.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) {
+            printf("%s VK_FORMAT_G8_B8R8_2PLANE_420_UNORM destination transfer not supported; skipped.\n", kSkipPrefix);
+        } else {
+            VkBufferImageCopy mp_region = {};
+            mp_region.bufferOffset = 0;
+            mp_region.bufferRowLength = 0;
+            mp_region.bufferImageHeight = 0;
+            mp_region.imageSubresource.mipLevel = 0;
+            mp_region.imageSubresource.baseArrayLayer = 0;
+            mp_region.imageSubresource.layerCount = 1;
+            mp_region.imageOffset = {0, 0, 0};
+            mp_region.imageExtent = {128, 128, 1};
+
+            // YUV420 means 1/2 width and height so plane_0 is 128x128 and plane_1 is 64x64 here
+            VkImageObj image_multi_planar(m_device);
+            image_multi_planar.Init(128, 128, 1, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                    VK_IMAGE_TILING_OPTIMAL, 0);
+            ASSERT_TRUE(image_multi_planar.initialized());
+
+            // Copies into a mutli-planar image aspect properly
+            m_errorMonitor->ExpectSuccess();
+            mp_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+            vk::CmdCopyBufferToImage(m_commandBuffer->handle(), buffer_16k.handle(), image_multi_planar.handle(),
+                                     VK_IMAGE_LAYOUT_GENERAL, 1, &mp_region);
+            m_errorMonitor->VerifyNotFound();
+
+            // uses plane_2 without being 3 planar format
+            m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "VUID-VkBufferImageCopy-aspectMask-01560");
+            mp_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_2_BIT;
+            vk::CmdCopyBufferToImage(m_commandBuffer->handle(), buffer_16k.handle(), image_multi_planar.handle(),
+                                     VK_IMAGE_LAYOUT_GENERAL, 1, &mp_region);
+            m_errorMonitor->VerifyFound();
+
+            // uses single-plane aspect mask
+            m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "VUID-VkBufferImageCopy-aspectMask-01560");
+            mp_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            vk::CmdCopyBufferToImage(m_commandBuffer->handle(), buffer_16k.handle(), image_multi_planar.handle(),
+                                     VK_IMAGE_LAYOUT_GENERAL, 1, &mp_region);
+            m_errorMonitor->VerifyFound();
+
+            // VkImageObj is destroyed at end of scope which invalidates the command buffer
+            // explicitly reset for next potential scope using it
+            m_commandBuffer->reset();
+            m_commandBuffer->begin();
+        }
     }
 }
 

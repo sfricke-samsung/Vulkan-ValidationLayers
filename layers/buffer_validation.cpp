@@ -5170,6 +5170,30 @@ bool CoreChecks::ValidateBufferImageCopyData(uint32_t regionCount, const VkBuffe
                                 mip_extent.depth);
             }
         }
+
+        // Checks that apply only to multi-planar format images
+        if (FormatIsMultiplane(image_state->createInfo.format)) {
+
+            // VK_IMAGE_ASPECT_PLANE_2_BIT valid only for image formats with three planes
+            if ((FormatPlaneCount(image_state->createInfo.format) < 3) &&
+                (pRegions[i].imageSubresource.aspectMask == VK_IMAGE_ASPECT_PLANE_2_BIT)) {
+                skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT,
+                                HandleToUint64(image_state->image), "VUID-VkBufferImageCopy-aspectMask-01560",
+                                "%s(): pRegion[%d] subresource aspectMask cannot be VK_IMAGE_ASPECT_PLANE_2_BIT unless image "
+                                "format has three planes.",
+                                function, i);
+            }
+
+            // image subresource aspectMask must be VK_IMAGE_ASPECT_PLANE_*_BIT
+            if (0 == (pRegions[i].imageSubresource.aspectMask &
+                      (VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT | VK_IMAGE_ASPECT_PLANE_2_BIT))) {
+                skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT,
+                                HandleToUint64(image_state->image), "VUID-VkBufferImageCopy-aspectMask-01560",
+                                "%s(): pRegion[%d] subresource aspectMask for multi-plane image formats must have a "
+                                "VK_IMAGE_ASPECT_PLANE_*_BIT when copying to or from.",
+                                function, i);
+            }
+        }
     }
 
     return skip;
