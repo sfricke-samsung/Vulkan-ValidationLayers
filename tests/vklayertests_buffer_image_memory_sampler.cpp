@@ -1064,13 +1064,31 @@ TEST_F(VkLayerTest, BindInvalidMemory) {
     mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
     mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
     mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+
+    bool bind_memory_2_extension = DeviceExtensionSupported(gpu(), nullptr, VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+
     if (mp_extensions) {
         m_device_extension_names.push_back(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
         m_device_extension_names.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
         m_device_extension_names.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
         m_device_extension_names.push_back(VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+    } else if (bind_memory_2_extension) {
+        // bind_memory_2_extension is subset of mp_extensions
+        m_device_extension_names.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
     }
     ASSERT_NO_FATAL_FAILURE(InitState());
+
+    // Create aliased function pointers for 1.0 and 1.1 contexts
+    PFN_vkBindImageMemory2KHR vkBindImageMemory2Function = nullptr;
+    PFN_vkGetImageMemoryRequirements2KHR vkGetImageMemoryRequirements2Function = nullptr;
+    if (DeviceValidationVersion() >= VK_API_VERSION_1_1) {
+        vkBindImageMemory2Function = vk::BindImageMemory2;
+        vkGetImageMemoryRequirements2Function = vk::GetImageMemoryRequirements2;
+    } else {
+        vkBindImageMemory2Function = (PFN_vkBindImageMemory2KHR)vk::GetDeviceProcAddr(m_device->handle(), "vkBindImageMemory2KHR");
+        vkGetImageMemoryRequirements2Function =
+            (PFN_vkGetImageMemoryRequirements2KHR)vk::GetDeviceProcAddr(m_device->handle(), "vkGetImageMemoryRequirements2KHR");
+    }
 
     const VkFormat tex_format = VK_FORMAT_R8G8B8A8_UNORM;
     const int32_t tex_width = 256;
@@ -1098,6 +1116,24 @@ TEST_F(VkLayerTest, BindInvalidMemory) {
     buffer_create_info.size = 4 * 1024 * 1024;
     buffer_create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    // Only gets used in MP tests
+    VkFormat mp_format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+    VkImageCreateInfo mp_image_create_info = image_create_info;
+    mp_image_create_info.format = mp_format;
+    mp_image_create_info.flags = VK_IMAGE_CREATE_DISJOINT_BIT;
+
+    // Check for support of format used by all multi-planar tests
+    if (mp_extensions == true) {
+        VkFormatProperties mp_format_properties;
+        vk::GetPhysicalDeviceFormatProperties(m_device->phy().handle(), mp_format, &mp_format_properties);
+        // Need to make sure disjoint is supported for format
+        // Also need to support an arbitrary image usage feature
+        if (0 ==
+            (mp_format_properties.optimalTilingFeatures & (VK_FORMAT_FEATURE_DISJOINT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))) {
+            mp_extensions = false;
+        }
+    }
 
     // Create an image/buffer, allocate memory, free it, and then try to bind it
     {
@@ -1193,11 +1229,11 @@ TEST_F(VkLayerTest, BindInvalidMemory) {
     // Try to bind memory to an object with an invalid memoryOffset
     {
         VkImage image = VK_NULL_HANDLE;
-        err = vk::CreateImage(device(), &image_create_info, NULL, &image);
-        ASSERT_VK_SUCCESS(err);
+        VkImage unchecked_image = VK_NULL_HANDLE;
+        ASSERT_VK_SUCCESS(vk::CreateImage(device(), &image_create_info, NULL, &image));
+        ASSERT_VK_SUCCESS(vk::CreateImage(device(), &image_create_info, NULL, &unchecked_image));
         VkBuffer buffer = VK_NULL_HANDLE;
-        err = vk::CreateBuffer(device(), &buffer_create_info, NULL, &buffer);
-        ASSERT_VK_SUCCESS(err);
+        ASSERT_VK_SUCCESS(vk::CreateBuffer(device(), &buffer_create_info, NULL, &buffer));
         VkMemoryRequirements image_mem_reqs = {}, buffer_mem_reqs = {};
         vk::GetImageMemoryRequirements(device(), image, &image_mem_reqs);
         vk::GetBufferMemoryRequirements(device(), buffer, &buffer_mem_reqs);
@@ -1211,16 +1247,53 @@ TEST_F(VkLayerTest, BindInvalidMemory) {
         ASSERT_TRUE(pass);
         pass = m_device->phy().set_memory_type(buffer_mem_reqs.memoryTypeBits, &buffer_alloc_info, 0);
         ASSERT_TRUE(pass);
-        VkDeviceMemory image_mem, buffer_mem;
-        err = vk::AllocateMemory(device(), &image_alloc_info, NULL, &image_mem);
-        ASSERT_VK_SUCCESS(err);
-        err = vk::AllocateMemory(device(), &buffer_alloc_info, NULL, &buffer_mem);
-        ASSERT_VK_SUCCESS(err);
+        VkDeviceMemory image_mem, unchecked_image_mem, buffer_mem;
+        ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &image_alloc_info, NULL, &image_mem));
+        ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &image_alloc_info, NULL, &unchecked_image_mem));
+        ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &buffer_alloc_info, NULL, &buffer_mem));
+
+        // Keep values outside scope so multiple tests cases can reuse
+        VkImage mp_image = VK_NULL_HANDLE;
+        VkImage mp_unchecked_image = VK_NULL_HANDLE;
+        VkDeviceMemory mp_image_mem = VK_NULL_HANDLE;
+        VkDeviceMemory mp_unchecked_image_mem = VK_NULL_HANDLE;
+        VkMemoryRequirements2 mp_image_mem_reqs2 = {};
+        VkMemoryAllocateInfo mp_image_alloc_info = {};
+        if (mp_extensions == true) {
+            ASSERT_VK_SUCCESS(vk::CreateImage(device(), &mp_image_create_info, NULL, &mp_image));
+            ASSERT_VK_SUCCESS(vk::CreateImage(device(), &mp_image_create_info, NULL, &mp_unchecked_image));
+
+            VkImagePlaneMemoryRequirementsInfo image_plane_req = {VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO};
+            image_plane_req.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+
+            VkImageMemoryRequirementsInfo2 mem_req_info2 = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+            mem_req_info2.pNext = &image_plane_req;
+            mem_req_info2.image = image;
+            mp_image_mem_reqs2.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+            vkGetImageMemoryRequirements2Function(device(), &mem_req_info2, &mp_image_mem_reqs2);
+
+            mp_image_alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            // Leave some extra space for alignment wiggle room
+            mp_image_alloc_info.allocationSize =
+                mp_image_mem_reqs2.memoryRequirements.size + mp_image_mem_reqs2.memoryRequirements.alignment;
+            pass = m_device->phy().set_memory_type(mp_image_mem_reqs2.memoryRequirements.memoryTypeBits, &mp_image_alloc_info, 0);
+            ASSERT_TRUE(pass);
+
+            ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &mp_image_alloc_info, NULL, &mp_image_mem));
+            ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &mp_image_alloc_info, NULL, &mp_unchecked_image_mem));
+        }
 
         // Test unaligned memory offset
         {
             if (image_mem_reqs.alignment > 1) {
                 VkDeviceSize image_offset = 1;
+                m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-vkBindImageMemory-memoryOffset-01048");
+                err = vk::BindImageMemory(device(), image, image_mem, image_offset);
+                (void)err;  // This may very well return an error.
+                m_errorMonitor->VerifyFound();
+
+                // Image was created with same imageCreateInfo so should also have alignment over 1
+                // Image wasn't checked, but state tracker saves information regardless
                 m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-vkBindImageMemory-memoryOffset-01048");
                 err = vk::BindImageMemory(device(), image, image_mem, image_offset);
                 (void)err;  // This may very well return an error.
@@ -1233,6 +1306,62 @@ TEST_F(VkLayerTest, BindInvalidMemory) {
                 err = vk::BindBufferMemory(device(), buffer, buffer_mem, buffer_offset);
                 (void)err;  // This may very well return an error.
                 m_errorMonitor->VerifyFound();
+            }
+
+            // single-plane image
+            if (bind_memory_2_extension == true) {
+                VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
+                bind_image_info.pNext = nullptr;
+                bind_image_info.image = image;
+                bind_image_info.memory = image_mem;
+                bind_image_info.memoryOffset = 1;  // off alignment
+
+                if (mp_extensions == true) {
+                    VkImageMemoryRequirementsInfo2 mem_req_info2 = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+                    mem_req_info2.pNext = nullptr;
+                    mem_req_info2.image = image;
+                    VkMemoryRequirements2 mem_req2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+                    vkGetImageMemoryRequirements2Function(device(), &mem_req_info2, &mem_req2);
+
+                    if (mem_req2.memoryRequirements.alignment > 1) {
+                        m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-pNext-01616");
+                        vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                        m_errorMonitor->VerifyFound();
+                    }
+                } else {
+                    // Same as 01048 but with bindImageMemory2 call
+                    if (image_mem_reqs.alignment > 1) {
+                        m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-memoryOffset-01613");
+                        vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                        m_errorMonitor->VerifyFound();
+                    }
+                }
+            }
+
+            // Multi-plane image
+            if (mp_extensions == true) {
+                if (mp_image_mem_reqs2.memoryRequirements.alignment > 1) {
+                    VkBindImagePlaneMemoryInfo plane_memory_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO};
+                    plane_memory_info.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+
+                    VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
+                    bind_image_info.pNext = &plane_memory_info;
+                    bind_image_info.image = mp_image;
+                    bind_image_info.memory = mp_image_mem;
+                    bind_image_info.memoryOffset = 1;  // off alignment
+
+                    m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-pNext-01620");
+                    vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                    m_errorMonitor->VerifyFound();
+
+                    // Image was created with same imageCreateInfo so should also have alignment over 1
+                    // Image wasn't checked, but state tracker saves information regardless
+                    bind_image_info.image = mp_unchecked_image;
+                    bind_image_info.memory = mp_unchecked_image_mem;
+                    m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-pNext-01620");
+                    vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                    m_errorMonitor->VerifyFound();
+                }
             }
         }
 
@@ -1271,22 +1400,85 @@ TEST_F(VkLayerTest, BindInvalidMemory) {
                 (void)err;  // This may very well return an error.
                 m_errorMonitor->VerifyFound();
             }
+
+            // single-plane image
+            if (bind_memory_2_extension == true) {
+                VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
+                bind_image_info.pNext = nullptr;
+                bind_image_info.image = image;
+                bind_image_info.memory = image_mem;
+
+                if (mp_extensions == true) {
+                    VkImageMemoryRequirementsInfo2 mem_req_info2 = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+                    mem_req_info2.pNext = nullptr;
+                    mem_req_info2.image = image;
+                    VkMemoryRequirements2 mem_req2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+                    vkGetImageMemoryRequirements2Function(device(), &mem_req_info2, &mem_req2);
+
+                    VkDeviceSize image2_offset =
+                        (mem_req2.memoryRequirements.size - 1) & ~(mem_req2.memoryRequirements.alignment - 1);
+                    if ((image2_offset > 0) && (mem_req2.memoryRequirements.size <
+                                                (image_alloc_info.allocationSize - mem_req2.memoryRequirements.alignment))) {
+                        bind_image_info.memoryOffset = image2_offset;
+                        m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-pNext-01617");
+                        vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                        m_errorMonitor->VerifyFound();
+                    }
+                } else {
+                    // Same as 01049 but with bindImageMemory2 call
+                    if ((image_offset > 0) &&
+                        (image_mem_reqs.size < (image_alloc_info.allocationSize - image_mem_reqs.alignment))) {
+                        bind_image_info.memoryOffset = image_offset;
+                        m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-memoryOffset-01614");
+                        vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                        m_errorMonitor->VerifyFound();
+                    }
+                }
+            }
+
+            // Multi-plane image
+            if (mp_extensions == true) {
+                VkDeviceSize mp_image_offset =
+                    (mp_image_mem_reqs2.memoryRequirements.size - 1) & ~(mp_image_mem_reqs2.memoryRequirements.alignment - 1);
+                if ((mp_image_offset > 0) &&
+                    (mp_image_mem_reqs2.memoryRequirements.size <
+                     (mp_image_alloc_info.allocationSize - mp_image_mem_reqs2.memoryRequirements.alignment))) {
+                    VkBindImagePlaneMemoryInfo plane_memory_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO};
+                    plane_memory_info.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+
+                    VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
+                    bind_image_info.pNext = &plane_memory_info;
+                    bind_image_info.image = mp_image;
+                    bind_image_info.memory = mp_image_mem;
+                    bind_image_info.memoryOffset = mp_image_offset;
+
+                    m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-pNext-01621");
+                    vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                    m_errorMonitor->VerifyFound();
+                }
+            }
         }
 
         vk::FreeMemory(device(), image_mem, NULL);
+        vk::FreeMemory(device(), unchecked_image_mem, NULL);
         vk::FreeMemory(device(), buffer_mem, NULL);
         vk::DestroyImage(device(), image, NULL);
+        vk::DestroyImage(device(), unchecked_image, NULL);
         vk::DestroyBuffer(device(), buffer, NULL);
+        if (mp_extensions == true) {
+            vk::FreeMemory(device(), mp_image_mem, NULL);
+            vk::DestroyImage(device(), mp_image, NULL);
+            vk::FreeMemory(device(), mp_unchecked_image_mem, NULL);
+            vk::DestroyImage(device(), mp_unchecked_image, NULL);
+        }
     }
 
     // Try to bind memory to an object with an invalid memory type
     {
         VkImage image = VK_NULL_HANDLE;
-        err = vk::CreateImage(device(), &image_create_info, NULL, &image);
-        ASSERT_VK_SUCCESS(err);
+        ASSERT_VK_SUCCESS(vk::CreateImage(device(), &image_create_info, NULL, &image));
         VkBuffer buffer = VK_NULL_HANDLE;
-        err = vk::CreateBuffer(device(), &buffer_create_info, NULL, &buffer);
-        ASSERT_VK_SUCCESS(err);
+        ASSERT_VK_SUCCESS(vk::CreateBuffer(device(), &buffer_create_info, NULL, &buffer));
         VkMemoryRequirements image_mem_reqs = {}, buffer_mem_reqs = {};
         vk::GetImageMemoryRequirements(device(), image, &image_mem_reqs);
         vk::GetBufferMemoryRequirements(device(), buffer, &buffer_mem_reqs);
@@ -1300,6 +1492,26 @@ TEST_F(VkLayerTest, BindInvalidMemory) {
         VkPhysicalDeviceMemoryProperties memory_properties = {};
         vk::GetPhysicalDeviceMemoryProperties(m_device->phy().handle(), &memory_properties);
         VkDeviceMemory image_mem, buffer_mem;
+
+        VkImage mp_image = VK_NULL_HANDLE;
+        VkDeviceMemory mp_image_mem = VK_NULL_HANDLE;
+        VkMemoryRequirements2 mp_image_mem_reqs2 = {};
+        VkMemoryAllocateInfo mp_image_alloc_info = {};
+        if (mp_extensions == true) {
+            ASSERT_VK_SUCCESS(vk::CreateImage(device(), &mp_image_create_info, NULL, &mp_image));
+
+            VkImagePlaneMemoryRequirementsInfo image_plane_req = {VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO};
+            image_plane_req.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+
+            VkImageMemoryRequirementsInfo2 mem_req_info2 = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+            mem_req_info2.pNext = &image_plane_req;
+            mem_req_info2.image = image;
+            mp_image_mem_reqs2.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+            vkGetImageMemoryRequirements2Function(device(), &mem_req_info2, &mp_image_mem_reqs2);
+
+            mp_image_alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            mp_image_alloc_info.allocationSize = mp_image_mem_reqs2.memoryRequirements.size;
+        }
 
         uint32_t image_unsupported_mem_type_bits = ((1 << memory_properties.memoryTypeCount) - 1) & ~image_mem_reqs.memoryTypeBits;
         if (image_unsupported_mem_type_bits != 0) {
@@ -1328,8 +1540,78 @@ TEST_F(VkLayerTest, BindInvalidMemory) {
             vk::FreeMemory(device(), buffer_mem, NULL);
         }
 
+        // single-plane image
+        if (bind_memory_2_extension == true) {
+            VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
+            bind_image_info.pNext = nullptr;
+            bind_image_info.image = image;
+            bind_image_info.memoryOffset = 0;
+
+            if (mp_extensions == true) {
+                VkImageMemoryRequirementsInfo2 mem_req_info2 = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+                mem_req_info2.pNext = nullptr;
+                mem_req_info2.image = image;
+                VkMemoryRequirements2 mem_req2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+                vkGetImageMemoryRequirements2Function(device(), &mem_req_info2, &mem_req2);
+
+                uint32_t image2_unsupported_mem_type_bits =
+                    ((1 << memory_properties.memoryTypeCount) - 1) & ~mem_req2.memoryRequirements.memoryTypeBits;
+                if (image2_unsupported_mem_type_bits != 0) {
+                    pass = m_device->phy().set_memory_type(image2_unsupported_mem_type_bits, &image_alloc_info, 0);
+                    ASSERT_TRUE(pass);
+                    ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &image_alloc_info, NULL, &image_mem));
+                    bind_image_info.memory = image_mem;
+                    ;
+                    m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-pNext-01615");
+                    vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                    m_errorMonitor->VerifyFound();
+                    vk::FreeMemory(device(), image_mem, NULL);
+                }
+            } else {
+                // Same as 01047 but with bindImageMemory2 call
+                if (image_unsupported_mem_type_bits != 0) {
+                    pass = m_device->phy().set_memory_type(image_unsupported_mem_type_bits, &image_alloc_info, 0);
+                    ASSERT_TRUE(pass);
+                    ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &image_alloc_info, NULL, &image_mem));
+                    bind_image_info.memory = image_mem;
+                    m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-memoryOffset-01612");
+                    vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                    m_errorMonitor->VerifyFound();
+                    vk::FreeMemory(device(), image_mem, NULL);
+                }
+            }
+        }
+
+        // Multi-plane image
+        if (mp_extensions == true) {
+            uint32_t mp_image_unsupported_mem_type_bits =
+                ((1 << memory_properties.memoryTypeCount) - 1) & ~mp_image_mem_reqs2.memoryRequirements.memoryTypeBits;
+            if (mp_image_unsupported_mem_type_bits != 0) {
+                pass = m_device->phy().set_memory_type(mp_image_unsupported_mem_type_bits, &mp_image_alloc_info, 0);
+                ASSERT_TRUE(pass);
+                ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &mp_image_alloc_info, NULL, &mp_image_mem));
+
+                VkBindImagePlaneMemoryInfo plane_memory_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO};
+                plane_memory_info.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+
+                VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
+                bind_image_info.pNext = &plane_memory_info;
+                bind_image_info.image = mp_image;
+                bind_image_info.memory = mp_image_mem;
+                bind_image_info.memoryOffset = 0;
+
+                m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-pNext-01619");
+                vkBindImageMemory2Function(device(), 1, &bind_image_info);
+                m_errorMonitor->VerifyFound();
+                vk::FreeMemory(device(), mp_image_mem, NULL);
+            }
+        }
+
         vk::DestroyImage(device(), image, NULL);
         vk::DestroyBuffer(device(), buffer, NULL);
+        if (mp_extensions == true) {
+            vk::DestroyImage(device(), mp_image, NULL);
+        }
     }
 
     // Try to bind memory to an image created with sparse memory flags
@@ -1411,151 +1693,124 @@ TEST_F(VkLayerTest, BindInvalidMemory) {
         }
     }
 
-    // Try to bind an image created with multi-planar formats
-    if (!mp_extensions) {
-        printf("%s test requires KHR YCbCr extensions, not available.  Skipping.\n", kSkipPrefix);
-    } else {
-        // Create aliased function pointers for 1.0 and 1.1 contexts
-        PFN_vkBindImageMemory2KHR vkBindImageMemory2Function = nullptr;
-        PFN_vkGetImageMemoryRequirements2KHR vkGetImageMemoryRequirements2Function = nullptr;
-        if (DeviceValidationVersion() >= VK_API_VERSION_1_1) {
-            vkBindImageMemory2Function = vk::BindImageMemory2;
-            vkGetImageMemoryRequirements2Function = vk::GetImageMemoryRequirements2;
-        } else {
-            vkBindImageMemory2Function =
-                (PFN_vkBindImageMemory2KHR)vk::GetDeviceProcAddr(m_device->handle(), "vkBindImageMemory2KHR");
-            vkGetImageMemoryRequirements2Function =
-                (PFN_vkGetImageMemoryRequirements2KHR)vk::GetDeviceProcAddr(m_device->handle(), "vkGetImageMemoryRequirements2KHR");
-        }
+    // Try to bind an image created with multi-planar formats that are disjoint
+    if (mp_extensions == true) {
+        image_create_info = {};
+        image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_create_info.pNext = NULL;
+        image_create_info.imageType = VK_IMAGE_TYPE_2D;
+        image_create_info.format = mp_format;
+        image_create_info.extent.width = 64;
+        image_create_info.extent.height = 64;
+        image_create_info.extent.depth = 1;
+        image_create_info.mipLevels = 1;
+        image_create_info.arrayLayers = 1;
+        image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+        image_create_info.flags = VK_IMAGE_CREATE_DISJOINT_BIT;
 
-        // Try to bind an image created with Disjoint bit
-        VkFormatProperties format_properties;
-        VkFormat mp_format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-        vk::GetPhysicalDeviceFormatProperties(m_device->phy().handle(), mp_format, &format_properties);
-        // Need to make sure disjoint is supported for format
-        // Also need to support an arbitrary image usage feature
-        if (0 ==
-            (format_properties.optimalTilingFeatures & (VK_FORMAT_FEATURE_DISJOINT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))) {
-            printf("%s test requires disjoint/sampled feature bit on format.  Skipping.\n", kSkipPrefix);
-        } else {
-            image_create_info = {};
-            image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            image_create_info.pNext = NULL;
-            image_create_info.imageType = VK_IMAGE_TYPE_2D;
-            image_create_info.format = mp_format;
-            image_create_info.extent.width = 64;
-            image_create_info.extent.height = 64;
-            image_create_info.extent.depth = 1;
-            image_create_info.mipLevels = 1;
-            image_create_info.arrayLayers = 1;
-            image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
-            image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-            image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-            image_create_info.flags = VK_IMAGE_CREATE_DISJOINT_BIT;
+        VkImage image;
+        err = vk::CreateImage(device(), &image_create_info, NULL, &image);
+        ASSERT_VK_SUCCESS(err);
 
-            VkImage image;
-            err = vk::CreateImage(device(), &image_create_info, NULL, &image);
-            ASSERT_VK_SUCCESS(err);
+        VkImagePlaneMemoryRequirementsInfo image_plane_req = {VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO};
+        image_plane_req.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
 
-            VkImagePlaneMemoryRequirementsInfo image_plane_req = {VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO};
-            image_plane_req.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        VkImageMemoryRequirementsInfo2 mem_req_info2 = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+        mem_req_info2.pNext = &image_plane_req;
+        mem_req_info2.image = image;
+        VkMemoryRequirements2 mem_req2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+        vkGetImageMemoryRequirements2Function(device(), &mem_req_info2, &mem_req2);
 
-            VkImageMemoryRequirementsInfo2 mem_req_info2 = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
-            mem_req_info2.pNext = &image_plane_req;
-            mem_req_info2.image = image;
-            VkMemoryRequirements2 mem_req2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
-            vkGetImageMemoryRequirements2Function(device(), &mem_req_info2, &mem_req2);
+        // Find a valid memory type index to memory to be allocated from
+        VkMemoryAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        alloc_info.allocationSize = mem_req2.memoryRequirements.size;
+        pass = m_device->phy().set_memory_type(mem_req2.memoryRequirements.memoryTypeBits, &alloc_info, 0);
+        ASSERT_TRUE(pass);
 
-            // Find a valid memory type index to memory to be allocated from
-            VkMemoryAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-            alloc_info.allocationSize = mem_req2.memoryRequirements.size;
-            pass = m_device->phy().set_memory_type(mem_req2.memoryRequirements.memoryTypeBits, &alloc_info, 0);
-            ASSERT_TRUE(pass);
+        VkDeviceMemory image_memory;
+        ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &alloc_info, NULL, &image_memory));
 
-            VkDeviceMemory image_memory;
-            ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &alloc_info, NULL, &image_memory));
+        // Bind disjoint with BindImageMemory instead of BindImageMemory2
+        m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-vkBindImageMemory-image-01608");
+        vk::BindImageMemory(device(), image, image_memory, 0);
+        m_errorMonitor->VerifyFound();
 
-            // Bind disjoint with BindImageMemory instead of BindImageMemory2
-            m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-vkBindImageMemory-image-01608");
-            vk::BindImageMemory(device(), image, image_memory, 0);
-            m_errorMonitor->VerifyFound();
+        VkBindImagePlaneMemoryInfo plane_memory_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO};
+        ASSERT_TRUE(FormatPlaneCount(mp_format) == 2);
+        plane_memory_info.planeAspect = VK_IMAGE_ASPECT_PLANE_2_BIT;
 
-            VkBindImagePlaneMemoryInfo plane_memory_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO};
-            ASSERT_TRUE(FormatPlaneCount(mp_format) == 2);
-            plane_memory_info.planeAspect = VK_IMAGE_ASPECT_PLANE_2_BIT;
+        VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
+        bind_image_info.pNext = &plane_memory_info;
+        bind_image_info.image = image;
+        bind_image_info.memory = image_memory;
+        bind_image_info.memoryOffset = 0;
 
-            VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
-            bind_image_info.pNext = &plane_memory_info;
-            bind_image_info.image = image;
-            bind_image_info.memory = image_memory;
-            bind_image_info.memoryOffset = 0;
+        // Set invalid planeAspect
+        m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImagePlaneMemoryInfo-planeAspect-02283");
+        // Might happen as plane2 wasn't queried for its memroy type
+        m_errorMonitor->SetUnexpectedError("VUID-VkBindImageMemoryInfo-pNext-01619");
+        vkBindImageMemory2Function(device(), 1, &bind_image_info);
+        m_errorMonitor->VerifyFound();
 
-            // Set invalid planeAspect
-            m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImagePlaneMemoryInfo-planeAspect-02283");
-            vkBindImageMemory2Function(device(), 1, &bind_image_info);
-            m_errorMonitor->VerifyFound();
+        vk::FreeMemory(device(), image_memory, NULL);
+        vk::DestroyImage(device(), image, nullptr);
+    }
 
-            vk::FreeMemory(device(), image_memory, NULL);
-            vk::DestroyImage(device(), image, nullptr);
-        }
+    // Try to bind an image created with multi-planar formats that are NOT disjoint
+    if (mp_extensions == true) {
+        image_create_info = {};
+        image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_create_info.pNext = NULL;
+        image_create_info.imageType = VK_IMAGE_TYPE_2D;
+        image_create_info.format = mp_format;
+        image_create_info.extent.width = 64;
+        image_create_info.extent.height = 64;
+        image_create_info.extent.depth = 1;
+        image_create_info.mipLevels = 1;
+        image_create_info.arrayLayers = 1;
+        image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+        image_create_info.flags = 0;  // no disjoint bit set
 
-        // Bind image with VkBindImagePlaneMemoryInfo without disjoint bit in image
-        // Need to support an arbitrary image usage feature for multi-planar format
-        if (0 == (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
-            printf("%s test requires sampled feature bit on multi-planar format.  Skipping.\n", kSkipPrefix);
-        } else {
-            image_create_info = {};
-            image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            image_create_info.pNext = NULL;
-            image_create_info.imageType = VK_IMAGE_TYPE_2D;
-            image_create_info.format = mp_format;
-            image_create_info.extent.width = 64;
-            image_create_info.extent.height = 64;
-            image_create_info.extent.depth = 1;
-            image_create_info.mipLevels = 1;
-            image_create_info.arrayLayers = 1;
-            image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
-            image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-            image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-            image_create_info.flags = 0;  // no disjoint bit set
+        VkImage image;
+        err = vk::CreateImage(device(), &image_create_info, NULL, &image);
+        ASSERT_VK_SUCCESS(err);
 
-            VkImage image;
-            err = vk::CreateImage(device(), &image_create_info, NULL, &image);
-            ASSERT_VK_SUCCESS(err);
+        VkImagePlaneMemoryRequirementsInfo image_plane_req = {VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO};
+        image_plane_req.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
 
-            VkImagePlaneMemoryRequirementsInfo image_plane_req = {VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO};
-            image_plane_req.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        VkImageMemoryRequirementsInfo2 mem_req_info2 = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+        mem_req_info2.pNext = &image_plane_req;
+        mem_req_info2.image = image;
+        VkMemoryRequirements2 mem_req2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+        vkGetImageMemoryRequirements2Function(device(), &mem_req_info2, &mem_req2);
 
-            VkImageMemoryRequirementsInfo2 mem_req_info2 = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
-            mem_req_info2.pNext = &image_plane_req;
-            mem_req_info2.image = image;
-            VkMemoryRequirements2 mem_req2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
-            vkGetImageMemoryRequirements2Function(device(), &mem_req_info2, &mem_req2);
+        // Find a valid memory type index to memory to be allocated from
+        VkMemoryAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        alloc_info.allocationSize = mem_req2.memoryRequirements.size;
+        pass = m_device->phy().set_memory_type(mem_req2.memoryRequirements.memoryTypeBits, &alloc_info, 0);
+        ASSERT_TRUE(pass);
 
-            // Find a valid memory type index to memory to be allocated from
-            VkMemoryAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-            alloc_info.allocationSize = mem_req2.memoryRequirements.size;
-            pass = m_device->phy().set_memory_type(mem_req2.memoryRequirements.memoryTypeBits, &alloc_info, 0);
-            ASSERT_TRUE(pass);
+        VkDeviceMemory image_memory;
+        ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &alloc_info, NULL, &image_memory));
 
-            VkDeviceMemory image_memory;
-            ASSERT_VK_SUCCESS(vk::AllocateMemory(device(), &alloc_info, NULL, &image_memory));
+        VkBindImagePlaneMemoryInfo plane_memory_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO};
+        plane_memory_info.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
+        bind_image_info.pNext = &plane_memory_info;
+        bind_image_info.image = image;
+        bind_image_info.memory = image_memory;
+        bind_image_info.memoryOffset = 0;
 
-            VkBindImagePlaneMemoryInfo plane_memory_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO};
-            plane_memory_info.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
-            VkBindImageMemoryInfo bind_image_info = {VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};
-            bind_image_info.pNext = &plane_memory_info;
-            bind_image_info.image = image;
-            bind_image_info.memory = image_memory;
-            bind_image_info.memoryOffset = 0;
+        m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-pNext-01618");
+        vkBindImageMemory2Function(device(), 1, &bind_image_info);
+        m_errorMonitor->VerifyFound();
 
-            m_errorMonitor->SetDesiredFailureMsg(kErrorBit, "VUID-VkBindImageMemoryInfo-pNext-01618");
-            vkBindImageMemory2Function(device(), 1, &bind_image_info);
-            m_errorMonitor->VerifyFound();
-
-            vk::FreeMemory(device(), image_memory, NULL);
-            vk::DestroyImage(device(), image, nullptr);
-        }
+        vk::FreeMemory(device(), image_memory, NULL);
+        vk::DestroyImage(device(), image, nullptr);
     }
 }
 
