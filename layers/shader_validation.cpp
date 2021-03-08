@@ -105,7 +105,8 @@ static shader_stage_attributes shader_stage_attribs[] = {
     {"fragment shader", false, false, VK_SHADER_STAGE_FRAGMENT_BIT},
 };
 
-unsigned ExecutionModelToShaderStageFlagBits(unsigned mode);
+static unsigned ExecutionModelToShaderStageFlagBits(unsigned mode);
+static bool AtomicOperation(uint32_t opcode);
 
 // SPIRV utility functions
 void SHADER_MODULE_STATE::BuildDefIndex() {
@@ -166,8 +167,12 @@ void SHADER_MODULE_STATE::BuildDefIndex() {
                 def_index[insn.word(2)] = insn.offset();
                 break;
 
-                // Variables
+                // Have a result that can be a pointer
             case spv::OpVariable:
+            case spv::OpAccessChain:
+            case spv::OpInBoundsAccessChain:
+            case spv::OpFunctionParameter:
+            case spv::OpImageTexelPointer:
                 def_index[insn.word(2)] = insn.offset();
                 break;
 
@@ -232,6 +237,37 @@ void SHADER_MODULE_STATE::BuildDefIndex() {
             } break;
 
             default:
+                // Handle atomics here while looping instructions and updating class
+                // This also works in initial pass because atomics operands all need to be defined
+                if (AtomicOperation(insn.opcode()) == true) {
+                    atomic_instruction atomic;
+                    // All atomics have a pointer referenced
+                    spirv_inst_iter access;
+                    if (insn.opcode() == spv::OpAtomicStore) {
+                        access = get_def(insn.word(1));
+                    } else {
+                        access = get_def(insn.word(3));
+                        def_index[insn.word(2)] = insn.offset();
+                    }
+
+                    auto pointer = get_def(access.word(1));
+                    assert(pointer.opcode() == spv::OpTypePointer);
+                    atomic.storage_class = pointer.word(2);
+
+                    auto data_type = get_def(pointer.word(3));
+                    atomic.type = data_type.opcode();
+
+                    if (data_type.opcode() == spv::OpTypeFloat || data_type.opcode() == spv::OpTypeInt) {
+                        atomic.bit_width = data_type.word(2);
+                    } else {
+                        // TODO - There should be no atomics to things not float/int but if there is, skip tracking/validating it.
+                        // We should have a proper GetBitWidth like spirv-val does
+                        continue;
+                    }
+
+                    atomic_inst[insn.offset()] = atomic;
+                }
+
                 // We don't care about any other defs for now.
                 break;
         }
@@ -2616,6 +2652,168 @@ bool CoreChecks::ValidateShaderStageMaxResources(VkShaderStageFlagBits stage, co
     return skip;
 }
 
+bool CoreChecks::ValidateAtomicsTypes(SHADER_MODULE_STATE const *src) const {
+    bool skip = false;
+    // reduce name size for readabilty
+    const VkPhysicalDeviceShaderAtomicFloatFeaturesEXT &float_feature = enabled_features.shader_atomic_float_feature;
+    // Collect the required features bits once
+    // clang-format off
+    const bool valid_storage_buffer_float = (
+        (float_feature.shaderBufferFloat32Atomics == VK_TRUE) ||
+        (float_feature.shaderBufferFloat32AtomicAdd == VK_TRUE) ||
+        (float_feature.shaderBufferFloat64Atomics == VK_TRUE) ||
+        (float_feature.shaderBufferFloat64AtomicAdd == VK_TRUE));
+    const bool valid_workgroup_float = (
+        (float_feature.shaderSharedFloat32Atomics == VK_TRUE) ||
+        (float_feature.shaderSharedFloat32AtomicAdd == VK_TRUE) ||
+        (float_feature.shaderSharedFloat64Atomics == VK_TRUE) ||
+        (float_feature.shaderSharedFloat64AtomicAdd == VK_TRUE));
+    const bool valid_image_float = (
+        (float_feature.shaderImageFloat32Atomics == VK_TRUE) ||
+        (float_feature.shaderImageFloat32AtomicAdd == VK_TRUE) ||
+        (float_feature.sparseImageFloat32Atomics == VK_TRUE) ||
+        (float_feature.sparseImageFloat32AtomicAdd == VK_TRUE));
+     const bool valid_image_int = (
+        (enabled_features.shader_image_atomic_int64_feature.shaderImageInt64Atomics == VK_TRUE) ||
+        (enabled_features.shader_image_atomic_int64_feature.sparseImageInt64Atomics == VK_TRUE));
+    const bool valid_32_float = (
+        (float_feature.shaderBufferFloat32Atomics == VK_TRUE) ||
+        (float_feature.shaderBufferFloat32AtomicAdd == VK_TRUE) ||
+        (float_feature.shaderSharedFloat32Atomics == VK_TRUE) ||
+        (float_feature.shaderSharedFloat64AtomicAdd == VK_TRUE) ||
+        (float_feature.shaderImageFloat32Atomics == VK_TRUE) ||
+        (float_feature.shaderImageFloat32AtomicAdd == VK_TRUE) ||
+        (float_feature.sparseImageFloat32Atomics == VK_TRUE) ||
+        (float_feature.sparseImageFloat32AtomicAdd == VK_TRUE));
+    const bool valid_64_float = (
+        (float_feature.shaderBufferFloat64Atomics == VK_TRUE) ||
+        (float_feature.shaderBufferFloat32AtomicAdd == VK_TRUE) ||
+        (float_feature.shaderSharedFloat64Atomics == VK_TRUE) ||
+        (float_feature.shaderSharedFloat64AtomicAdd == VK_TRUE));
+    // clang-format on
+
+    for (auto &atomic_inst : src->atomic_inst) {
+        const atomic_instruction &atomic = atomic_inst.second;
+        const uint32_t opcode = src->at(atomic_inst.first).opcode();
+
+        if ((atomic.bit_width == 64) && (atomic.type == spv::OpTypeInt)) {
+            // Validate 64-bit atomics
+            if (((atomic.storage_class == spv::StorageClassStorageBuffer) || (atomic.storage_class == spv::StorageClassUniform)) &&
+                (enabled_features.core12.shaderBufferInt64Atomics == VK_FALSE)) {
+                skip |= LogError(
+                    device, "UNASSIGNED-CoreValidation-Shader-shaderBufferInt64Atomics",
+                    "%s: Can't use 64-bit int atomics operations with %s storage class without shaderBufferInt64Atomics enabled.",
+                    report_data->FormatHandle(src->vk_shader_module).c_str(), StorageClassName(atomic.storage_class));
+            } else if ((atomic.storage_class == spv::StorageClassWorkgroup) &&
+                       (enabled_features.core12.shaderSharedInt64Atomics == VK_FALSE)) {
+                skip |= LogError(device, "UNASSIGNED-CoreValidation-Shader-shaderSharedInt64Atomics",
+                                 "%s: Can't use 64-bit int atomics operations with Workgroup storage class without "
+                                 "shaderSharedInt64Atomics enabled.",
+                                 report_data->FormatHandle(src->vk_shader_module).c_str());
+            } else if ((atomic.storage_class == spv::StorageClassImage) && (valid_image_int == false)) {
+                skip |= LogError(device, "UNASSIGNED-CoreValidation-Shader-imageImageAtomic",
+                                 "%s: Can't use 64-bit int atomics operations with Image storage class without "
+                                 "shaderImageInt64Atomics or sparseImageInt64Atomics enabled.",
+                                 report_data->FormatHandle(src->vk_shader_module).c_str());
+            }
+        } else if (atomic.type == spv::OpTypeFloat) {
+            // Validate Floats
+            if (atomic.storage_class == spv::StorageClassStorageBuffer) {
+                if (valid_storage_buffer_float == false) {
+                    skip |= LogError(device, "UNASSIGNED-CoreValidation-Shader-storageBufferFloatAtomic",
+                                     "%s: Can't use float atomics operations with StorageBuffer storage class without "
+                                     "shaderBufferFloat32Atomics or shaderBufferFloat32AtomicAdd or shaderBufferFloat64Atomics or "
+                                     "shaderBufferFloat64AtomicAdd enabled.",
+                                     report_data->FormatHandle(src->vk_shader_module).c_str());
+                } else if (opcode == spv::OpAtomicFAddEXT) {
+                    if ((atomic.bit_width == 32) && (float_feature.shaderBufferFloat32AtomicAdd == VK_FALSE)) {
+                        skip |= LogError(device, "UNASSIGNED-CoreValidation-Shader-storageBufferFloatAtomic",
+                                         "%s: Can't use 32-bit float atomics for add operations (OpAtomicFAddEXT) with "
+                                         "StorageBuffer storage class without shaderBufferFloat32AtomicAdd enabled.",
+                                         report_data->FormatHandle(src->vk_shader_module).c_str());
+                    } else if ((atomic.bit_width == 64) && (float_feature.shaderBufferFloat64AtomicAdd == VK_FALSE)) {
+                        skip |= LogError(device, "UNASSIGNED-CoreValidation-Shader-storageBufferFloatAtomic",
+                                         "%s: Can't use 64-bit float atomics for add operations (OpAtomicFAddEXT) with "
+                                         "StorageBuffer storage class without shaderBufferFloat64AtomicAdd enabled.",
+                                         report_data->FormatHandle(src->vk_shader_module).c_str());
+                    }
+                } else {
+                    // Assume is valid load/store/exchange or else spirv-val will catch
+                    if ((atomic.bit_width == 32) && (float_feature.shaderBufferFloat32Atomics == VK_FALSE)) {
+                        skip |= LogError(
+                            device, "UNASSIGNED-CoreValidation-Shader-storageBufferFloatAtomic",
+                            "%s: Can't use 32-bit float atomics for load/store/exhange operations (OpAtomicLoad, OpAtomicStore, "
+                            "OpAtomicExchange) with StorageBuffer storage class without shaderBufferFloat32Atomics enabled.",
+                            report_data->FormatHandle(src->vk_shader_module).c_str());
+                    } else if ((atomic.bit_width == 64) && (float_feature.shaderBufferFloat64Atomics == VK_FALSE)) {
+                        skip |= LogError(
+                            device, "UNASSIGNED-CoreValidation-Shader-storageBufferFloatAtomic",
+                            "%s: Can't use 64-bit float atomics for load/store/exhange operations (OpAtomicLoad, OpAtomicStore, "
+                            "OpAtomicExchange) with StorageBuffer storage class without shaderBufferFloat64Atomics enabled.",
+                            report_data->FormatHandle(src->vk_shader_module).c_str());
+                    }
+                }
+            } else if (atomic.storage_class == spv::StorageClassWorkgroup) {
+                if (valid_workgroup_float == false) {
+                    skip |= LogError(
+                        device, "UNASSIGNED-CoreValidation-Shader-workgroupFloatAtomic",
+                        "%s: Can't use float atomics operations with Workgroup storage class without shaderSharedFloat32Atomics or "
+                        "shaderSharedFloat32AtomicAdd or shaderSharedFloat64Atomics or shaderSharedFloat64AtomicAdd enabled.",
+                        report_data->FormatHandle(src->vk_shader_module).c_str());
+                } else if (opcode == spv::OpAtomicFAddEXT) {
+                    if ((atomic.bit_width == 32) && (float_feature.shaderSharedFloat32AtomicAdd == VK_FALSE)) {
+                        skip |= LogError(device, "UNASSIGNED-CoreValidation-Shader-workgroupFloatAtomic",
+                                         "%s: Can't use 32-bit float atomics for add operations (OpAtomicFAddEXT) with Workgroup "
+                                         "storage class without shaderSharedFloat32AtomicAdd enabled.",
+                                         report_data->FormatHandle(src->vk_shader_module).c_str());
+                    } else if ((atomic.bit_width == 64) && (float_feature.shaderSharedFloat64AtomicAdd == VK_FALSE)) {
+                        skip |= LogError(device, "UNASSIGNED-CoreValidation-Shader-workgroupFloatAtomic",
+                                         "%s: Can't use 64-bit float atomics for add operations (OpAtomicFAddEXT) with Workgroup "
+                                         "storage class without shaderSharedFloat64AtomicAdd enabled.",
+                                         report_data->FormatHandle(src->vk_shader_module).c_str());
+                    }
+                } else {
+                    // Assume is valid load/store/exchange or else spirv-val will catch
+                    if ((atomic.bit_width == 32) && (float_feature.shaderSharedFloat32Atomics == VK_FALSE)) {
+                        skip |= LogError(
+                            device, "UNASSIGNED-CoreValidation-Shader-workgroupFloatAtomic",
+                            "%s: Can't use 32-bit float atomics for load/store/exhange operations (OpAtomicLoad, OpAtomicStore, "
+                            "OpAtomicExchange) with Workgroup storage class without shaderSharedFloat32Atomics enabled.",
+                            report_data->FormatHandle(src->vk_shader_module).c_str());
+                    } else if ((atomic.bit_width == 64) && (float_feature.shaderSharedFloat64Atomics == VK_FALSE)) {
+                        skip |= LogError(
+                            device, "UNASSIGNED-CoreValidation-Shader-workgroupFloatAtomic",
+                            "%s: Can't use 64-bit float atomics for load/store/exhange operations (OpAtomicLoad, OpAtomicStore, "
+                            "OpAtomicExchange) with Workgroup storage class without shaderSharedFloat64Atomics enabled.",
+                            report_data->FormatHandle(src->vk_shader_module).c_str());
+                    }
+                }
+            } else if ((atomic.storage_class == spv::StorageClassImage) && (valid_image_float == false)) {
+                skip |=
+                    LogError(device, "UNASSIGNED-CoreValidation-Shader-imageFloatAtomic",
+                             "%s: Can't use float atomics operations with Image storage class without shaderImageFloat32Atomics or "
+                             "shaderImageFloat32AtomicAdd or sparseImageFloat32Atomics or sparseImageFloat32AtomicAdd enabled.",
+                             report_data->FormatHandle(src->vk_shader_module).c_str());
+            } else if ((atomic.bit_width == 32) && (valid_32_float == false)) {
+                skip |= LogError(device, "UNASSIGNED-CoreValidation-Shader-float32Atomic",
+                                 "%s: Can't use 32-bit float atomics operations without shaderBufferFloat32Atomics or "
+                                 "shaderBufferFloat32AtomicAdd or shaderSharedFloat32Atomics or shaderSharedFloat32AtomicAdd or "
+                                 "shaderImageFloat32Atomics or shaderImageFloat32AtomicAdd or sparseImageFloat32Atomics or "
+                                 "sparseImageFloat32AtomicAdd enabled.",
+                                 report_data->FormatHandle(src->vk_shader_module).c_str());
+            } else if ((atomic.bit_width == 64) && (valid_64_float == false)) {
+                skip |=
+                    LogError(device, "UNASSIGNED-CoreValidation-Shader-float64Atomic",
+                             "%s: Can't use 64-bit float atomics operations without shaderBufferFloat64Atomics or "
+                             "shaderBufferFloat64AtomicAdd or shaderSharedFloat64Atomics or shaderSharedFloat64AtomicAdd enabled.",
+                             report_data->FormatHandle(src->vk_shader_module).c_str());
+            }
+        }
+    }
+
+    return skip;
+}
+
 // copy the specialization constant value into buf, if it is present
 void GetSpecConstantValue(VkPipelineShaderStageCreateInfo const *pStage, uint32_t spec_id, void *buf) {
     VkSpecializationInfo const *spec = pStage->pSpecializationInfo;
@@ -3501,6 +3699,7 @@ bool CoreChecks::ValidatePipelineShaderStage(VkPipelineShaderStageCreateInfo con
         ValidateShaderStageWritableOrAtomicDescriptor(pStage->stage, has_writable_descriptor, stage_state.has_atomic_descriptor);
     skip |= ValidateShaderStageInputOutputLimits(module, pStage, pipeline, entrypoint);
     skip |= ValidateShaderStageMaxResources(pStage->stage, pipeline);
+    skip |= ValidateAtomicsTypes(module);
     skip |= ValidateExecutionModes(module, entrypoint);
     skip |= ValidateSpecializationOffsets(pStage);
     skip |= ValidatePushConstantUsage(*pipeline, module, pStage);

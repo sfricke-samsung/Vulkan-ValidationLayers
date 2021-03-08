@@ -120,6 +120,12 @@ struct decoration_set {
     void add(uint32_t decoration, uint32_t value);
 };
 
+struct atomic_instruction {
+    uint32_t storage_class;
+    uint32_t bit_width;
+    uint32_t type;  // ex. OpTypeInt
+};
+
 struct function_set {
     unsigned id;
     unsigned offset;
@@ -210,6 +216,7 @@ struct SHADER_MODULE_STATE : public BASE_NODE {
     bool has_specialization_constants{false};
     VkShaderModule vk_shader_module;
     uint32_t gpu_validation_shader_id;
+    std::unordered_map<uint32_t, atomic_instruction> atomic_inst;
 
     std::vector<uint32_t> PreprocessShaderBinary(uint32_t *src_binary, size_t binary_size, spv_target_env env) {
         std::vector<uint32_t> src(src_binary, src_binary + binary_size / sizeof(uint32_t));
